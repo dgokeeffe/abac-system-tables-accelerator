@@ -84,7 +84,7 @@ abac-system-tables apply \
   --output /secure/path/apply-evidence.json
 ```
 
-Apply re-discovers sources and facade state, validates `current_user() = session_user()`, requires the exact reviewed plan digest, revokes every discovered non-trusted direct catalog/schema/table privilege (including tag/management authority), retires stale tagged materialized views, and restores only the declared least-privilege consumer grants at the end. Before any grant is restored, it boundedly polls `SHOW EFFECTIVE POLICIES` for every workspace-scoped materialized view. Existing governed tags are retained only when their allowed-value sets match exactly. A failed apply intentionally leaves consumers denied until an administrator diagnoses and safely reruns or rolls back.
+Apply re-discovers sources and facade state, validates `current_user() = session_user()`, requires the exact reviewed plan digest, revokes every discovered non-trusted direct catalog/schema/table privilege (including currently desired consumer grants and tag/management authority), retires stale tagged materialized views, and restores only the declared least-privilege consumer grants at the end. This intentionally causes a fail-closed read interruption on every apply. Before any grant is restored, it boundedly polls `SHOW EFFECTIVE POLICIES` for every workspace-scoped materialized view. Existing governed tags are retained only when their allowed-value sets match exactly. A failed apply intentionally leaves consumers denied until an administrator diagnoses and safely reruns or rolls back.
 
 ## Verify as representative service principals
 

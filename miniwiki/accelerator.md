@@ -91,6 +91,6 @@ Offline evidence: `make check` passes 64 tests with 91% coverage, strict Ruff an
 
 What changed or was learned: a complete public-safe package, bundle, examples, CI, operations/security docs, config validator, planner, apply engine, and representative-principal verifier now exist. Live metadata confirmed mixed workspace/account scope and reused workspace display names. Standalone materialized views work for every workspace-scoped source in the test metastore; object-level grants are required because Databricks creates untagged backing tables in the same schema.
 
-Still uncertain: direct-source denial cannot be demonstrated in the current sandbox because of its broad account-admin inheritance. The four account-global tables remain admin-only except for the single reviewed price reference.
+Still uncertain: direct-source denial cannot be demonstrated in the current sandbox because of its broad account-admin inheritance. The four account-global tables remain admin-only except for the single reviewed price reference. Every apply deliberately revokes and later restores even correct consumer grants to close replacement/tag propagation windows, so operators must plan a temporary read interruption; facade ownership and non-table authority remain operational governance responsibilities.
 
 Next question: run the denied-source matrix in a production-like least-privilege tenant before promotion, then decide whether the retained regression identities should be deleted or owned as permanent test fixtures.
