@@ -1,0 +1,35 @@
+# Local Databricks and environment state
+.databrickscfg
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databricks bundle local state
+.databricks/
+
+# Generated plans and live evidence can contain tenant metadata
+out/
+reports/
+*.plan.json
+*.evidence.json
+
+# Pi harness state
+.pi-subagents/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
