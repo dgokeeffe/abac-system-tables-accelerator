@@ -85,7 +85,7 @@ Three account-group-backed representative service principals authenticated as th
 
 A direct-source-denial assertion could not be accepted in this sandbox because its broad `account users` group carries the account-admin role, so every representative service principal inherits direct system-table access independently of the accelerator. This environment limitation is disclosed rather than reported as a pass. Production acceptance must audit and remove direct `system` grants/roles and run the repository's authorization-specific denied-source checks in a least-privilege tenant.
 
-Offline evidence: `make check` passes 64 tests with 91% coverage, strict Ruff and mypy, package builds, example parsing, and secret scan. `databricks bundle validate --strict` and `git diff --check` pass. Raw connected evidence and tenant identifiers remain outside Git.
+Offline evidence: `make check` passes 64 tests with 91% coverage, strict Ruff and mypy, package builds, example parsing, and secret scan. `databricks bundle validate --strict` and `git diff --check` pass. The public repository is https://github.com/dgokeeffe/abac-system-tables-accelerator and its GitHub Actions `ci` workflow passes from the committed public-PyPI lock. Raw connected evidence and tenant identifiers remain outside Git.
 
 ## Handoff
 
