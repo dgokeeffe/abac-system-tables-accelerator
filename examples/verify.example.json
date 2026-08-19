@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "bu-alpha-representative",
+      "profile": "replace-with-short-lived-sp-profile",
+      "expected_identity": "replace-with-service-principal-identity",
+      "consumer_group": "bu_alpha_system_table_readers",
+      "checks": [
+        {
+          "relation": "system_tables_facade.published.access__audit",
+          "expectation": "scoped"
+        },
+        {
+          "relation": "system_tables_facade.published.billing__list_prices",
+          "expectation": "shared"
+        },
+        {
+          "relation": "system.access.audit",
+          "expectation": "denied"
+        }
+      ]
+    }
+  ]
+}

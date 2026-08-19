@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "facade": {
+    "catalog": "system_tables_facade",
+    "schema": "published",
+    "refresh_every_hours": 24
+  },
+  "tags": {
+    "table_key": "system_table_scope",
+    "workspace_column_key": "workspace_scope_column"
+  },
+  "consumer_groups": [
+    {
+      "name": "bu_alpha_system_table_readers",
+      "workspace_ids": [
+        "1111111111111111"
+      ]
+    },
+    {
+      "name": "bu_beta_system_table_readers",
+      "workspace_ids": [
+        "2222222222222222",
+        "3333333333333333"
+      ]
+    }
+  ],
+  "trusted_principals": [
+    "system_table_facade_admins",
+    "system_table_facade_pipeline"
+  ],
+  "overrides": [
+    {
+      "source": "system.billing.list_prices",
+      "disposition": "account_shared",
+      "rationale": "Published pricing is account-global reference data with no tenant rows."
+    }
+  ]
+}

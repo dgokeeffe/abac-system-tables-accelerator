@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "databricks-abac-system-tables"
+version = "0.1.0"
+description = "Config-driven least-privilege ABAC facade for Databricks system tables"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Databricks" }]
+dependencies = ["databricks-sdk>=0.80.0,<1"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+  "build>=1.2.2",
+  "mypy>=1.15",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.11",
+]
+
+[project.scripts]
+abac-system-tables = "abac_system_tables.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/abac_system_tables"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "S", "UP", "B", "SIM", "RUF"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["abac_system_tables"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --cov=abac_system_tables --cov-report=term-missing --cov-fail-under=85"
+testpaths = ["tests"]

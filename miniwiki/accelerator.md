@@ -77,10 +77,20 @@ Offline: config parser and semantic validation; SQL golden tests; injection/malf
 
 Connected: dry-run discovery; create isolated facade; inspect effective policies/tags/grants; run positive/negative/admin/source-bypass matrix as short-lived representative service principals through Statement Execution API; delete or revoke temporary credentials immediately; keep raw evidence outside Git; rerun after fixes and independent review.
 
+## Connected verification (redacted)
+
+An isolated deployment was completed through the Statement Execution API. Discovery assigned an explicit disposition to all 40 enabled system tables: 35 workspace-scoped, one reviewed account-shared reference table, and four account-global/admin-only tables. The final full apply completed 379 ordered steps successfully, including reconciliation of all direct non-trusted facade privileges and 35 effective-policy propagation gates before least-privilege grants were restored.
+
+Three account-group-backed representative service principals authenticated as themselves through short-lived OAuth M2M credentials. Each principal's aggregate verification returned exactly one assigned workspace scope and zero disallowed rows from the workspace inventory facade; each could read the reviewed account-shared reference. Consumer groups have `USE SCHEMA` plus direct `SELECT` only on the 36 named facade materialized views. They have no schema-wide `SELECT`, and materialization backing/event-log objects have no consumer grants. Temporary OAuth secrets were revoked immediately after testing; controlled test groups and service principals remain for repeatable regression testing.
+
+A direct-source-denial assertion could not be accepted in this sandbox because its broad `account users` group carries the account-admin role, so every representative service principal inherits direct system-table access independently of the accelerator. This environment limitation is disclosed rather than reported as a pass. Production acceptance must audit and remove direct `system` grants/roles and run the repository's authorization-specific denied-source checks in a least-privilege tenant.
+
+Offline evidence: `make check` passes 64 tests with 91% coverage, strict Ruff and mypy, package builds, example parsing, and secret scan. `databricks bundle validate --strict` and `git diff --check` pass. Raw connected evidence and tenant identifiers remain outside Git.
+
 ## Handoff
 
-What changed or was learned: repository initialised; official ABAC constraints and the materialized-facade architecture established; live metadata confirmed mixed workspace/account scope and reused workspace display names.
+What changed or was learned: a complete public-safe package, bundle, examples, CI, operations/security docs, config validator, planner, apply engine, and representative-principal verifier now exist. Live metadata confirmed mixed workspace/account scope and reused workspace display names. Standalone materialized views work for every workspace-scoped source in the test metastore; object-level grants are required because Databricks creates untagged backing tables in the same schema.
 
-Still uncertain: which governed tag creation path is available to the current administrator; whether all enabled system sources support materialized-view refresh; the approved production account-group names; and whether account-global tables should ever be shared.
+Still uncertain: direct-source denial cannot be demonstrated in the current sandbox because of its broad account-admin inheritance. The four account-global tables remain admin-only except for the single reviewed price reference.
 
-Next question: implement the strict config/plan/apply/test package and validate a minimal connected deployment before scaling to every enabled table.
+Next question: run the denied-source matrix in a production-like least-privilege tenant before promotion, then decide whether the retained regression identities should be deleted or owned as permanent test fixtures.

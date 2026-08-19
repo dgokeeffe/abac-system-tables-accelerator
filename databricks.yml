@@ -1,0 +1,32 @@
+bundle:
+  name: abac-system-tables-accelerator
+
+variables:
+  facade_catalog:
+    description: Facade catalog name (desired state remains in an external JSON config)
+    default: system_tables_facade
+  facade_schema:
+    description: Facade schema name
+    default: published
+  warehouse_id:
+    description: SQL warehouse used by Statement Execution; override outside Git
+    default: replace-at-deploy-time
+
+artifacts:
+  default:
+    type: whl
+    build: python3 -m build --wheel
+    path: .
+
+sync:
+  include:
+    - examples/*.json
+
+targets:
+  validation:
+    default: true
+    mode: development
+    variables:
+      facade_catalog: system_tables_facade
+      facade_schema: published
+      warehouse_id: replace-at-deploy-time
