@@ -15,6 +15,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --locked
-      - run: uv run make check
+      - run: uv sync --frozen --no-install-project
+      - run: PYTHONPATH=src uv run --no-sync make check
       - run: git diff --check
