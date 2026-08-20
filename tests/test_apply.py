@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from abac_system_tables.apply import ApplyError, apply_plan, validate_identity
@@ -16,15 +18,37 @@ def sample_plan():
     )
 
 
-def handler_factory(*, policy_after: int = 1, extra_tag: bool = False):
+def handler_factory(
+    *,
+    policy_after: int = 1,
+    extra_tag: bool = False,
+    existing_lease: str | None = None,
+    lease_stale: bool = False,
+):
     policy_calls = 0
+    lease_token: str | None = existing_lease
 
     def handler(statement: str, _rows: bool) -> StatementResult:
-        nonlocal policy_calls
+        nonlocal policy_calls, lease_token
         if statement.startswith("SELECT current_user"):
             return StatementResult(
                 "i", "SUCCEEDED", ("current_identity", "session_identity"), (("admin", "admin"),)
             )
+        if "SET lease_token = '" in statement and "lease_token IS NULL" in statement:
+            match = re.search(r"SET lease_token = '([0-9a-f]{32})'", statement)
+            assert match is not None
+            if lease_token is None or lease_stale:
+                lease_token = match.group(1)
+            return StatementResult("lock", "SUCCEEDED")
+        if statement.startswith("SELECT lease_token"):
+            return StatementResult("lock-status", "SUCCEEDED", ("lease_token",), ((lease_token,),))
+        if "SET lease_acquired_at = current_timestamp()" in statement:
+            return StatementResult("renew", "SUCCEEDED")
+        if "SET lease_token = NULL" in statement:
+            match = re.search(r"lease_token = '([0-9a-f]{32})'", statement)
+            if match is not None and lease_token == match.group(1):
+                lease_token = None
+            return StatementResult("release", "SUCCEEDED")
         if statement == "SHOW GOVERNED TAGS":
             return StatementResult(
                 "s",
@@ -61,6 +85,11 @@ def test_apply_requires_exact_plan_confirmation_and_identity() -> None:
     applied = apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
     assert len(applied) == len(plan.steps)
     assert all(item.state == "SUCCEEDED" for item in applied)
+    assert any("lease_token IS NULL" in statement for statement, _ in client.calls)
+    assert any("SET lease_token = NULL" in statement for statement, _ in client.calls)
+    assert any(
+        "SET lease_acquired_at = current_timestamp()" in statement for statement, _ in client.calls
+    )
     mismatch = FakeClient(
         lambda _s, _r: StatementResult(
             "i", "SUCCEEDED", ("current_identity", "session_identity"), (("one", "two"),)
@@ -68,6 +97,104 @@ def test_apply_requires_exact_plan_confirmation_and_identity() -> None:
     )
     with pytest.raises(ApplyError, match="differs"):
         validate_identity(mismatch)
+
+
+def test_deployment_lease_loser_fails_before_governance_mutation() -> None:
+    plan = sample_plan()
+    client = FakeClient(handler_factory(existing_lease="f" * 32))
+    with pytest.raises(ApplyError, match="lease could not be acquired"):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    lock_index = next(
+        index
+        for index, (statement, _) in enumerate(client.calls)
+        if "lease_token IS NULL" in statement
+    )
+    assert not any(
+        statement.startswith("REVOKE SELECT") or statement.startswith("ALTER TABLE `system`")
+        for statement, _ in client.calls[lock_index + 1 :]
+    )
+
+
+def test_failed_lease_proof_releases_candidate_token() -> None:
+    plan = sample_plan()
+    acquired = False
+
+    def handler(statement: str, _rows: bool) -> StatementResult:
+        nonlocal acquired
+        if statement.startswith("SELECT current_user"):
+            return StatementResult(
+                "identity",
+                "SUCCEEDED",
+                ("current_identity", "session_identity"),
+                (("admin", "admin"),),
+            )
+        if "SET lease_token = '" in statement and "lease_token IS NULL" in statement:
+            acquired = True
+            return StatementResult("acquire", "SUCCEEDED")
+        if statement.startswith("SELECT lease_token") and acquired:
+            raise StatementError("transient proof failure")
+        if "SET lease_token = NULL" in statement:
+            return StatementResult("release", "SUCCEEDED")
+        return StatementResult("other", "SUCCEEDED")
+
+    client = FakeClient(handler)
+    with pytest.raises(ApplyError, match="lease could not be acquired"):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert any("SET lease_token = NULL" in statement for statement, _ in client.calls)
+
+
+def test_stale_deployment_lease_is_recovered() -> None:
+    plan = sample_plan()
+    client = FakeClient(handler_factory(existing_lease="e" * 32, lease_stale=True))
+    applied = apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert len(applied) == len(plan.steps)
+    acquire = next(statement for statement, _ in client.calls if "lease_token IS NULL" in statement)
+    assert f"INTERVAL {30} MINUTES" in acquire
+
+
+def test_deployment_lease_releases_on_ordinary_failure() -> None:
+    plan = sample_plan()
+    base = handler_factory()
+
+    def handler(statement: str, rows: bool) -> StatementResult:
+        if statement.startswith("CREATE OR REPLACE FUNCTION"):
+            raise StatementError("injected failure")
+        return base(statement, rows)
+
+    client = FakeClient(handler)
+    with pytest.raises(ApplyError):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert any("SET lease_token = NULL" in statement for statement, _ in client.calls)
+
+
+def test_interrupt_after_acquisition_releases_lease() -> None:
+    plan = sample_plan()
+    base = handler_factory()
+
+    def handler(statement: str, rows: bool) -> StatementResult:
+        if statement.startswith("CREATE OR REPLACE FUNCTION"):
+            raise KeyboardInterrupt()
+        return base(statement, rows)
+
+    client = FakeClient(handler)
+    with pytest.raises(KeyboardInterrupt):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert any("SET lease_token = NULL" in statement for statement, _ in client.calls)
+
+
+def test_system_exit_after_acquisition_releases_lease() -> None:
+    plan = sample_plan()
+    base = handler_factory()
+
+    def handler(statement: str, rows: bool) -> StatementResult:
+        if statement.startswith("CREATE OR REPLACE FUNCTION"):
+            raise SystemExit("test exit")
+        return base(statement, rows)
+
+    client = FakeClient(handler)
+    with pytest.raises(SystemExit, match="test exit"):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert any("SET lease_token = NULL" in statement for statement, _ in client.calls)
 
 
 def test_policy_gate_allows_delayed_success_and_times_out_closed() -> None:
@@ -85,6 +212,26 @@ def test_policy_gate_allows_delayed_success_and_times_out_closed() -> None:
         )
 
 
+def test_conflicting_effective_row_filter_blocks_before_grants() -> None:
+    plan = sample_plan()
+    base_handler = handler_factory()
+
+    def handler(statement: str, rows: bool) -> StatementResult:
+        if statement.startswith("SHOW EFFECTIVE POLICIES"):
+            return StatementResult(
+                "p",
+                "SUCCEEDED",
+                ("policy_name", "policy_type"),
+                (("workspace_scope", "ROW_FILTER"), ("foreign_scope", "ROW_FILTER")),
+            )
+        return base_handler(statement, rows)
+
+    client = FakeClient(handler)
+    with pytest.raises(ApplyError, match="remains closed"):
+        apply_plan(client, plan, plan.digest, policy_attempts=1, policy_interval_seconds=0)
+    assert not any(statement.startswith("GRANT SELECT") for statement, _ in client.calls)
+
+
 def test_policy_gate_accepts_databricks_title_case_columns() -> None:
     base_handler = handler_factory()
 
@@ -95,7 +242,7 @@ def test_policy_gate_accepts_databricks_title_case_columns() -> None:
                 "p",
                 "SUCCEEDED",
                 ("Policy Name", "Policy Type", "Catalog", "Schema", "Table", "Comment"),
-                (("workspace_scope", "ROW_FILTER", "facade_catalog", "published", None, ""),),
+                (("workspace_scope", "ROW_FILTER", "system", "", None, ""),),
             )
         return result
 
@@ -150,10 +297,16 @@ def test_governed_tag_listing_accepts_databricks_title_case_columns() -> None:
 
 def test_create_tag_race_is_only_accepted_with_exact_description() -> None:
     plan = sample_plan()
+    base_handler = handler_factory()
 
     def handler(statement: str, rows: bool) -> StatementResult:
-        if statement.startswith("SELECT current_user"):
-            return handler_factory()(statement, rows)
+        if (
+            statement.startswith("SELECT current_user")
+            or statement.startswith("SELECT lease_token")
+            or "lease_token" in statement
+            or "lease_acquired_at" in statement
+        ):
+            return base_handler(statement, rows)
         if statement == "SHOW GOVERNED TAGS":
             return StatementResult("s", "SUCCEEDED", ("tag_name",), ())
         if statement.startswith("CREATE GOVERNED TAG"):

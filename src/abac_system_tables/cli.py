@@ -10,11 +10,11 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .apply import ApplyError, apply_plan
-from .client import DatabricksSqlClient, SqlClient, StatementError
+from .apply import apply_plan
+from .client import DatabricksSqlClient, SqlClient
 from .config import Config, ConfigError, load_config, loads_verify_config
-from .plan import Plan, build_plan, discover, discover_facade_state
-from .verify import VerificationError, verify_scenario
+from .plan import Plan, build_plan, discover, discover_governance_state
+from .verify import verify_scenario
 
 ClientFactory = Callable[[str, str], SqlClient]
 
@@ -45,8 +45,8 @@ def _load_plan(args: argparse.Namespace, factory: ClientFactory) -> tuple[Config
     warehouse_id = _warehouse_id(args.warehouse_id)
     client = factory(args.profile, warehouse_id)
     sources = discover(client)
-    facade_state = discover_facade_state(client, config)
-    plan = build_plan(config, sources, facade_state)
+    governance_state = discover_governance_state(client, config)
+    plan = build_plan(config, sources, governance_state)
     return config, plan, client
 
 
@@ -112,7 +112,7 @@ def _verify_command(args: argparse.Namespace, factory: ClientFactory) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="abac-system-tables",
-        description="Plan, apply, and verify a least-privilege system-table facade.",
+        description="Plan, apply, and verify direct ABAC on Databricks system tables.",
     )
     subparsers = root.add_subparsers(dest="command", required=True)
 
@@ -164,7 +164,7 @@ def main(
             "configuration or discovered state is invalid; no tenant metadata was emitted",
             file=sys.stderr,
         )
-    except (StatementError, ApplyError, VerificationError):
+    except Exception:
         # Platform errors can contain tenant metadata. Keep normal console output generic;
         # administrators can use SDK debug logging only in a protected local environment.
         print("operation failed; no tenant row data was emitted", file=sys.stderr)

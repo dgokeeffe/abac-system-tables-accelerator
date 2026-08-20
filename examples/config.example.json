@@ -1,9 +1,8 @@
 {
-  "version": 1,
-  "facade": {
-    "catalog": "system_tables_facade",
-    "schema": "published",
-    "refresh_every_hours": 24
+  "version": 2,
+  "governance": {
+    "catalog": "system_tables_governance",
+    "schema": "abac"
   },
   "tags": {
     "table_key": "system_table_scope",
@@ -25,14 +24,13 @@
     }
   ],
   "trusted_principals": [
-    "system_table_facade_admins",
-    "system_table_facade_pipeline"
+    "system_table_governance_admins"
   ],
   "overrides": [
     {
       "source": "system.billing.list_prices",
       "disposition": "account_shared",
-      "rationale": "Published pricing is account-global reference data with no tenant rows."
+      "rationale": "Published pricing is account-global reference data with no workspace-owned rows."
     }
   ]
 }

@@ -81,10 +81,15 @@ class DatabricksSqlClient:
     @staticmethod
     def _error(response: Any) -> tuple[str, str | None, str | None]:
         error = getattr(getattr(response, "status", None), "error", None)
-        message = str(getattr(error, "message", None) or "statement failed")
+        # Platform error messages can contain SQL text, object names, principals or IDs.
+        # Preserve only structured classification fields; callers receive a fixed message.
         code = getattr(error, "error_code", None)
         sql_state = getattr(error, "sql_state", None)
-        return message, str(code) if code else None, str(sql_state) if sql_state else None
+        return (
+            "statement failed",
+            str(code) if code else None,
+            str(sql_state) if sql_state else None,
+        )
 
     @staticmethod
     def _result(response: Any, include_rows: bool) -> StatementResult:

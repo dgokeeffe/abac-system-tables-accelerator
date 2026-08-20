@@ -18,25 +18,29 @@ DISCOVERY_COLUMNS = (
 
 def discovery_client() -> FakeClient:
     def handler(statement: str, _rows: bool) -> StatementResult:
-        if "table_catalog = 'system'" in statement:
+        if statement == "SHOW POLICIES ON CATALOG system":
+            return StatementResult("p", "SUCCEEDED", ("Policy Name", "Policy Type"), ())
+        if statement.startswith("WITH source_tables"):
             return StatementResult(
                 "d",
                 "SUCCEEDED",
                 DISCOVERY_COLUMNS,
                 (("access", "audit", "MANAGED", "17", "STRING"),),
             )
-        if "table_tags" in statement:
-            return StatementResult("t", "SUCCEEDED", ("table_name", "tag_value"), ())
-        if "schema_privileges" in statement:
+        if "information_schema.table_tags" in statement:
+            return StatementResult("t", "SUCCEEDED", ("schema_name", "table_name", "tag_value"), ())
+        if "information_schema.column_tags" in statement:
             return StatementResult(
-                "g", "SUCCEEDED", ("object_type", "object_name", "grantee", "privilege_type"), ()
+                "c", "SUCCEEDED", ("schema_name", "table_name", "column_name", "tag_value"), ()
             )
-        return StatementResult("o", "SUCCEEDED", ("table_name", "table_type"), ())
+        if "information_schema.table_privileges" in statement:
+            return StatementResult("e", "SUCCEEDED", ("grantee", "table_schema", "table_name"), ())
+        return StatementResult("s", "SUCCEEDED", ("table_name",), ())
 
     return FakeClient(handler)
 
 
-def test_plan_cli_is_read_only_redacted_and_discovers_state(tmp_path: Path, capsys: object) -> None:
+def test_plan_cli_is_read_only_and_redacted(tmp_path: Path, capsys: object) -> None:
     config = tmp_path / "config.json"
     config.write_text(valid_config_text())
     client = discovery_client()
@@ -48,7 +52,7 @@ def test_plan_cli_is_read_only_redacted_and_discovers_state(tmp_path: Path, caps
     output = capsys.readouterr().out  # type: ignore[attr-defined]
     payload = json.loads(output)
     assert payload["planDigest"] and '"111"' not in output and "bu_alpha" not in output
-    assert len(client.calls) == 4
+    assert len(client.calls) == 6
     assert all(
         not any(
             word in statement.upper()
@@ -78,10 +82,12 @@ def test_apply_wrong_plan_confirmation_does_not_mutate(tmp_path: Path, capsys: o
     )
     assert result == 2
     assert "tenant row data" in capsys.readouterr().err  # type: ignore[attr-defined]
-    assert len(client.calls) == 4
+    assert len(client.calls) == 6
 
 
-def test_verify_cli_requires_config_and_redacts(tmp_path: Path, capsys: object) -> None:
+def test_verify_cli_accepts_only_direct_system_checks_and_redacts(
+    tmp_path: Path, capsys: object
+) -> None:
     config = tmp_path / "config.json"
     config.write_text(valid_config_text())
     scenarios = tmp_path / "verify.json"
@@ -95,12 +101,7 @@ def test_verify_cli_requires_config_and_redacts(tmp_path: Path, capsys: object) 
                         "profile": "secret-profile",
                         "expected_identity": "sp",
                         "consumer_group": "bu_alpha",
-                        "checks": [
-                            {
-                                "relation": "facade_catalog.published.access__audit",
-                                "expectation": "scoped",
-                            }
-                        ],
+                        "checks": [{"relation": "system.access.audit", "expectation": "scoped"}],
                     }
                 ],
             }
@@ -137,11 +138,27 @@ def test_verify_cli_requires_config_and_redacts(tmp_path: Path, capsys: object) 
     )
     assert result == 0
     output = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert (
-        "secret-scenario" not in output
-        and "secret-profile" not in output
-        and "facade_catalog" not in output
+    assert "secret-scenario" not in output and "secret-profile" not in output
+    assert "system.access.audit" not in output
+
+
+def test_unexpected_runtime_failure_is_redacted(tmp_path: Path, capsys: object) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(valid_config_text())
+    client = FakeClient(
+        lambda _s, _r: (_ for _ in ()).throw(
+            RuntimeError("https://private.example system.secret.table")
+        )
     )
+    assert (
+        main(
+            ["plan", "--config", str(config), "--profile", "admin", "--warehouse-id", "w"],
+            client_factory=lambda _p, _w: client,
+        )
+        == 2
+    )
+    error = capsys.readouterr().err  # type: ignore[attr-defined]
+    assert "private.example" not in error and "system.secret.table" not in error
 
 
 def test_platform_failure_is_redacted(tmp_path: Path, capsys: object) -> None:

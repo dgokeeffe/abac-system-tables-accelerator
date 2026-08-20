@@ -13,7 +13,7 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _WORKSPACE_ID = re.compile(r"^[0-9]{1,32}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 @._+:/-]{0,254}$")
 _RELATION = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]{0,127}\.[A-Za-z_][A-Za-z0-9_]{0,127}"
+    r"^system\.[A-Za-z_][A-Za-z0-9_]{0,127}"
     r"\.[A-Za-z_][A-Za-z0-9_]{0,127}$"
 )
 _SECRET_KEY = re.compile(
@@ -23,6 +23,7 @@ _SECRET_VALUE = re.compile(
     r"(-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9._~-]+|\bdapi[a-zA-Z0-9]{16,})"
 )
 _DISPOSITIONS = frozenset({"workspace_scoped", "account_shared", "admin_only"})
+_RESERVED_CATALOGS = frozenset({"system", "samples", "__databricks_internal", "hive_metastore"})
 
 
 class ConfigError(ValueError):
@@ -109,10 +110,9 @@ def _reject_secrets(value: Any, path: str = "$") -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class Facade:
+class Governance:
     catalog: str
     schema: str
-    refresh_every_hours: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +137,7 @@ class Override:
 @dataclass(frozen=True, slots=True)
 class Config:
     version: int
-    facade: Facade
+    governance: Governance
     tags: Tags
     consumer_groups: tuple[ConsumerGroup, ...]
     trusted_principals: tuple[str, ...]
@@ -150,10 +150,9 @@ class Config:
                 {"name": group.name, "workspace_ids": list(group.workspace_ids)}
                 for group in self.consumer_groups
             ],
-            "facade": {
-                "catalog": self.facade.catalog,
-                "refresh_every_hours": self.facade.refresh_every_hours,
-                "schema": self.facade.schema,
+            "governance": {
+                "catalog": self.governance.catalog,
+                "schema": self.governance.schema,
             },
             "overrides": [
                 {
@@ -178,39 +177,37 @@ class Config:
 
 
 def loads_config(text: str) -> Config:
-    """Parse a strict JSON desired-state document."""
+    """Parse a strict v2 JSON desired-state document."""
     try:
         raw = json.loads(text, object_pairs_hook=_pairs)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid JSON: {exc.msg}") from exc
     _reject_secrets(raw)
+    if isinstance(raw, dict) and raw.get("version") == 1:
+        _fail("$.version", "v1 copied-data configuration is unsupported; migrate to v2 governance")
     root = _object(
         raw,
         "$",
-        {"version", "facade", "tags", "consumer_groups", "trusted_principals", "overrides"},
-        {"version", "facade", "tags", "consumer_groups", "trusted_principals"},
+        {"version", "governance", "tags", "consumer_groups", "trusted_principals", "overrides"},
+        {"version", "governance", "tags", "consumer_groups", "trusted_principals"},
     )
-    if type(root["version"]) is not int or root["version"] != 1:
-        _fail("$.version", "must equal 1")
+    if type(root["version"]) is not int or root["version"] != 2:
+        _fail("$.version", "must equal 2")
 
-    facade_raw = _object(
-        root["facade"],
-        "$.facade",
-        {"catalog", "schema", "refresh_every_hours"},
-        {"catalog", "schema", "refresh_every_hours"},
+    governance_raw = _object(
+        root["governance"],
+        "$.governance",
+        {"catalog", "schema"},
+        {"catalog", "schema"},
     )
-    hours = facade_raw["refresh_every_hours"]
-    if type(hours) is not int or not 1 <= hours <= 168:
-        _fail("$.facade.refresh_every_hours", "must be an integer from 1 to 168")
-    facade = Facade(
-        catalog=_identifier(facade_raw["catalog"], "$.facade.catalog"),
-        schema=_identifier(facade_raw["schema"], "$.facade.schema"),
-        refresh_every_hours=hours,
+    governance = Governance(
+        catalog=_identifier(governance_raw["catalog"], "$.governance.catalog"),
+        schema=_identifier(governance_raw["schema"], "$.governance.schema"),
     )
-    if facade.catalog.lower() in {"system", "samples", "__databricks_internal", "hive_metastore"}:
-        _fail("$.facade.catalog", "must be a separate, non-reserved facade catalog")
-    if facade.schema.lower() == "information_schema":
-        _fail("$.facade.schema", "must not use the reserved information_schema name")
+    if governance.catalog.casefold() in _RESERVED_CATALOGS:
+        _fail("$.governance.catalog", "must be a tenant-owned non-reserved governance catalog")
+    if governance.schema.casefold() == "information_schema":
+        _fail("$.governance.schema", "must not use information_schema")
 
     tags_raw = _object(
         root["tags"],
@@ -258,14 +255,12 @@ def loads_config(text: str) -> Config:
         "$.trusted_principals",
     )
     if not trusted:
-        _fail("$.trusted_principals", "must include at least one trusted admin or run-as principal")
+        _fail("$.trusted_principals", "must include at least one trusted admin")
     if any(item.casefold() == "account users" for item in trusted):
-        _fail("$.trusted_principals", "must not exempt the broad account users principal")
+        _fail("$.trusted_principals", "must not exempt account users")
     overlap = set(trusted) & {group.name for group in groups}
     if overlap:
         _fail("$", f"consumer and trusted principals overlap: {', '.join(sorted(overlap))}")
-    # The ABAC policy targets `account users`; only exemptions consume its remaining
-    # principal quota. Consumer groups are evaluated inside the fail-closed UDF.
     if len(trusted) + 1 > 20:
         _fail("$.trusted_principals", "policy principal limit allows at most 19 exemptions")
 
@@ -273,22 +268,14 @@ def loads_config(text: str) -> Config:
     for index, value in enumerate(_list(root.get("overrides", []), "$.overrides")):
         path = f"$.overrides[{index}]"
         item = _object(
-            value,
-            path,
-            {"source", "disposition", "rationale"},
-            {"source", "disposition"},
+            value, path, {"source", "disposition", "rationale"}, {"source", "disposition"}
         )
         source = _string(item["source"], f"{path}.source")
-        parts = source.split(".")
-        if (
-            len(parts) != 3
-            or parts[0] != "system"
-            or any(not _IDENTIFIER.fullmatch(part) for part in parts)
-        ):
+        if not _RELATION.fullmatch(source):
             _fail(f"{path}.source", "must be system.<schema>.<table>")
         disposition = _string(item["disposition"], f"{path}.disposition")
         if disposition not in _DISPOSITIONS:
-            _fail(f"{path}.disposition", "is not a supported disposition")
+            _fail(f"{path}.disposition", "is not supported")
         rationale_raw = item.get("rationale")
         rationale = (
             _string(rationale_raw, f"{path}.rationale", minimum=20)
@@ -301,8 +288,7 @@ def loads_config(text: str) -> Config:
             _fail(f"{path}.rationale", "is only allowed for account_shared")
         overrides.append(Override(source, disposition, rationale))
     _unique([item.source for item in overrides], "$.overrides[].source")
-
-    return Config(1, facade, tags, tuple(groups), trusted, tuple(overrides))
+    return Config(2, governance, tags, tuple(groups), trusted, tuple(overrides))
 
 
 def load_config(path: Path) -> Config:
@@ -353,14 +339,11 @@ def loads_verify_config(text: str) -> VerifyConfig:
         for check_index, check_value in enumerate(_list(item["checks"], f"{path}.checks")):
             check_path = f"{path}.checks[{check_index}]"
             check = _object(
-                check_value,
-                check_path,
-                {"relation", "expectation"},
-                {"relation", "expectation"},
+                check_value, check_path, {"relation", "expectation"}, {"relation", "expectation"}
             )
             relation = _string(check["relation"], f"{check_path}.relation")
             if not _RELATION.fullmatch(relation):
-                _fail(f"{check_path}.relation", "must be a safe three-part relation")
+                _fail(f"{check_path}.relation", "must be a direct system.<schema>.<table> relation")
             expectation = _string(check["expectation"], f"{check_path}.expectation")
             if expectation not in {"scoped", "shared", "denied"}:
                 _fail(f"{check_path}.expectation", "must be scoped, shared, or denied")

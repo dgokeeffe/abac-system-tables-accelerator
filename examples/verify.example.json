@@ -8,15 +8,15 @@
       "consumer_group": "bu_alpha_system_table_readers",
       "checks": [
         {
-          "relation": "system_tables_facade.published.access__audit",
+          "relation": "system.access.workspaces_latest",
           "expectation": "scoped"
         },
         {
-          "relation": "system_tables_facade.published.billing__list_prices",
+          "relation": "system.billing.list_prices",
           "expectation": "shared"
         },
         {
-          "relation": "system.access.audit",
+          "relation": "system.compute.node_types",
           "expectation": "denied"
         }
       ]

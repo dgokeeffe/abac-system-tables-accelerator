@@ -2,12 +2,12 @@ bundle:
   name: abac-system-tables-accelerator
 
 variables:
-  facade_catalog:
-    description: Facade catalog name (desired state remains in an external JSON config)
-    default: system_tables_facade
-  facade_schema:
-    description: Facade schema name
-    default: published
+  governance_catalog:
+    description: Tenant-owned catalog for UDF and deployment state only
+    default: system_tables_governance
+  governance_schema:
+    description: Governance control-plane schema
+    default: abac
   warehouse_id:
     description: SQL warehouse used by Statement Execution; override outside Git
     default: replace-at-deploy-time
@@ -27,6 +27,6 @@ targets:
     default: true
     mode: development
     variables:
-      facade_catalog: system_tables_facade
-      facade_schema: published
+      governance_catalog: system_tables_governance
+      governance_schema: abac
       warehouse_id: replace-at-deploy-time

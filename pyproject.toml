@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "databricks-abac-system-tables"
-version = "0.1.0"
-description = "Config-driven least-privilege ABAC facade for Databricks system tables"
+version = "0.2.0"
+description = "Config-driven direct ABAC for least-privilege Databricks system-table access"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

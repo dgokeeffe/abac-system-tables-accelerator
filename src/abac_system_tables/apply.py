@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 
 from . import sql
@@ -153,7 +155,82 @@ def _execute_policy_gate(
             )
         if attempt + 1 < attempts:
             time.sleep(interval_seconds)
-    raise ApplyError(f"effective policy did not propagate for {step.target}; facade remains closed")
+    raise ApplyError(
+        f"effective policy did not propagate for {step.target}; managed SELECT remains closed"
+    )
+
+
+def _deployment_lock_status(client: SqlClient, plan: Plan) -> str | None:
+    result = client.execute(
+        sql.deployment_lock_status(plan.governance_catalog, plan.governance_schema),
+        include_rows=True,
+    )
+    if result.columns != ("lease_token",) or len(result.rows) != 1 or len(result.rows[0]) != 1:
+        raise ApplyError("deployment lease status returned malformed evidence")
+    return result.rows[0][0]
+
+
+def _prove_deployment_lock(client: SqlClient, plan: Plan, lease_token: str) -> None:
+    if _deployment_lock_status(client, plan) != lease_token:
+        raise ApplyError("another apply owns the deployment lease")
+
+
+def _acquire_deployment_lock(
+    client: SqlClient, plan: Plan, step: PlanStep, lease_token: str
+) -> AppliedStep:
+    statement = sql.acquire_deployment_lock(
+        plan.governance_catalog, plan.governance_schema, lease_token
+    )
+    try:
+        result = client.execute(statement, include_rows=False)
+        _prove_deployment_lock(client, plan, lease_token)
+    except BaseException as exc:
+        # The conditional UPDATE may have succeeded even when ownership proof failed.
+        # Release the candidate token directly so an observable process does not wait for
+        # stale-lease expiry. The predicate cannot clear another writer's token.
+        with suppress(Exception):
+            client.execute(
+                sql.release_deployment_lock(
+                    plan.governance_catalog, plan.governance_schema, lease_token
+                ),
+                include_rows=False,
+            )
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ApplyError("deployment lease could not be acquired") from exc
+    return AppliedStep(
+        step.order,
+        step.kind,
+        step.target,
+        _statement_ref(result.statement_id),
+        result.state,
+    )
+
+
+def _renew_deployment_lock(client: SqlClient, plan: Plan, lease_token: str) -> None:
+    try:
+        client.execute(
+            sql.renew_deployment_lock(plan.governance_catalog, plan.governance_schema, lease_token),
+            include_rows=False,
+        )
+        _prove_deployment_lock(client, plan, lease_token)
+    except StatementError as exc:
+        raise ApplyError("deployment lease renewal failed") from exc
+
+
+def _release_deployment_lock(client: SqlClient, plan: Plan, lease_token: str) -> None:
+    try:
+        client.execute(
+            sql.release_deployment_lock(
+                plan.governance_catalog, plan.governance_schema, lease_token
+            ),
+            include_rows=False,
+        )
+        remaining = _deployment_lock_status(client, plan)
+    except StatementError as exc:
+        raise ApplyError("deployment lease release failed; bounded timeout is required") from exc
+    if remaining is not None:
+        raise ApplyError("deployment lease release was not confirmed")
 
 
 def apply_plan(
@@ -170,33 +247,59 @@ def apply_plan(
             "confirmation does not match the reviewed plan digest; run plan again and pass "
             "--confirm <planDigest>"
         )
+    lock_steps = [step for step in plan.steps if step.kind == "acquire_deployment_lock"]
+    if len(lock_steps) != 1:
+        raise ApplyError("plan must contain exactly one deployment lease step")
     validate_identity(client)
     applied: list[AppliedStep] = []
-    for step in plan.steps:
-        if step.kind == "ensure_governed_tag":
-            applied.append(_execute_tag_step(client, step))
-            continue
-        if step.kind == "verify_effective_policy":
+    lease_token: str | None = None
+    try:
+        for step in plan.steps:
+            if step.kind == "acquire_deployment_lock":
+                candidate = uuid.uuid4().hex
+                applied.append(_acquire_deployment_lock(client, plan, step, candidate))
+                lease_token = candidate
+                continue
+            if lease_token is not None:
+                # Heartbeat before every post-acquisition operation. A process that dies
+                # stops renewing; another writer may recover after the bounded timeout.
+                _renew_deployment_lock(client, plan, lease_token)
+            if step.kind == "ensure_governed_tag":
+                applied.append(_execute_tag_step(client, step))
+                continue
+            if step.kind == "verify_effective_policy":
+                applied.append(
+                    _execute_policy_gate(
+                        client,
+                        step,
+                        attempts=policy_attempts,
+                        interval_seconds=policy_interval_seconds,
+                    )
+                )
+                continue
+            try:
+                result = client.execute(step.statement, include_rows=False)
+            except StatementError as exc:
+                raise ApplyError(
+                    f"step {step.order} ({step.kind}) failed for {step.target}"
+                ) from exc
             applied.append(
-                _execute_policy_gate(
-                    client,
-                    step,
-                    attempts=policy_attempts,
-                    interval_seconds=policy_interval_seconds,
+                AppliedStep(
+                    step.order,
+                    step.kind,
+                    step.target,
+                    _statement_ref(result.statement_id),
+                    result.state,
                 )
             )
-            continue
-        try:
-            result = client.execute(step.statement, include_rows=False)
-        except StatementError as exc:
-            raise ApplyError(f"step {step.order} ({step.kind}) failed for {step.target}") from exc
-        applied.append(
-            AppliedStep(
-                step.order,
-                step.kind,
-                step.target,
-                _statement_ref(result.statement_id),
-                result.state,
-            )
-        )
+    except BaseException:
+        if lease_token is not None:
+            # Preserve the primary error. Conditional release cannot clear another
+            # writer's token; a failed release recovers through bounded expiry.
+            with suppress(Exception):
+                _release_deployment_lock(client, plan, lease_token)
+        raise
+    if lease_token is None:
+        raise ApplyError("deployment lease step did not execute")
+    _release_deployment_lock(client, plan, lease_token)
     return tuple(applied)

@@ -1,14 +1,14 @@
-# Databricks system tables access accelerator
+# Databricks system tables ABAC accelerator
 
-Give each business unit access to **only the system-table rows for the workspaces it manages**.
+Give each business unit direct access to Databricks system tables while Unity Catalog automatically hides rows for workspaces it does not manage.
 
-Databricks system tables contain data for an entire metastore. Granting a BU direct access can therefore reveal metadata from every workspace. This accelerator creates a separate, governed catalog where each BU can query familiar system-table data but only see its assigned workspace IDs.
+System tables contain metastore-wide metadata. A plain `SELECT` grant can expose every workspace. This accelerator applies governed tags and one ABAC row-filter policy **directly to the original `system` tables**, then grants every configured BU account group access to every workspace-scoped and explicitly approved account-shared table.
 
-> **Status: alpha reference accelerator.** Test it in a non-production environment. The redacted CLI plan is a safety summary, not a substitute for your organization's review of tenant-specific grants and changes.
+> **Status: alpha reference accelerator.** Test in a non-production metastore and review the effect on existing system-table readers before rollout.
 
-## The idea in one example
+## One concrete example
 
-Assume the Platform Operations account group is responsible for workspaces `101` and `102`. The administrator records that assignment:
+Assume the Platform Operations account group manages workspaces `101` and `102`:
 
 ```json
 {
@@ -21,128 +21,133 @@ Assume the Platform Operations account group is responsible for workspaces `101`
 }
 ```
 
-The accelerator keeps the Databricks-owned `system` table private. It publishes a separate, refreshable copy for BU readers and puts an automatic row gate on that copy.
-
-A Platform Operations member can query the published copy normally:
+A group member queries the original table normally:
 
 ```sql
-SELECT *
-FROM system_tables_facade.published.billing__usage;
+SELECT * FROM system.billing.usage;
 ```
 
-Unity Catalog checks every row against the caller's account-group assignment. The query needs no `WHERE` clause:
+Unity Catalog evaluates the ABAC row filter for every row:
 
-| Row's `workspace_id` | Result |
+| Row `workspace_id` | Result |
 |---|---|
 | `101` | returned |
 | `102` | returned |
 | `999` | hidden |
 | `NULL` | hidden |
 
-The group is not granted access to the original `system` table, so it cannot bypass this row gate through an accelerator-created grant.
+No copied data, materialized view, refresh job, or caller-supplied `WHERE` clause is involved.
 
 ## How it works
 
 ```text
-Administrator records which account group owns which workspace IDs
+Administrator configures: account group -> workspace IDs
         |
         v
-Databricks system tables stay private
+Accelerator tags original system tables and workspace_id columns
         |
-        | refresh a separate copy for BU readers
         v
-Published catalog — the only catalog the accelerator grants to BUs
+One ABAC policy on CATALOG system finds those governed tags
         |
-        | Unity Catalog automatically hides rows outside the group's IDs
         v
-BU account group sees its own workspace rows only
+Policy UDF checks caller's account groups + each row's workspace_id
+        |
+        v
+BU queries system.<schema>.<table> and sees assigned workspaces only
 ```
 
-The published catalog contains **materialized views**: stored, refreshable copies of supported system tables. The automatic row gate is a Unity Catalog **ABAC row-filter policy** attached to those copies.
+The small tenant-owned **governance schema** stores only:
 
-The copies are not real-time data. They introduce refresh latency, storage use and refresh cost; see [Limitations](#limitations). The accelerator uses copies because it cannot modify Databricks-owned system tables, and ordinary views cannot carry ABAC policies directly.
+- the SQL row-filter function;
+- immutable deployment metadata; and
+- a manifest of `SELECT` grants created by the accelerator.
 
-## Four concepts to know
+It never stores system-table rows.
 
-| Plain-language concept | Repository term | Meaning |
-|---|---|---|
-| **Original shared data** | **Source table** | A read-only table in Databricks' `system` catalog. The accelerator never grants this directly to BUs. |
-| **Guarded copy for BU readers** | **Published table** | A materialized view in the separate **published catalog**. The code sometimes calls this catalog the **facade**. |
-| **Who may see which workspaces** | **Consumer group** and **workspace assignment** | A Databricks account group and the workspace IDs for which it is responsible. |
-| **Automatic row gate** | **ABAC policy** | A Unity Catalog rule that attaches a row filter to published tables. A **governed tag** is the controlled label that tells the policy where to apply. |
+## Important default-deny behaviour
 
-## Who does what?
+The catalog policy applies to **`account users` except configured trusted principals**. Once a table carries the configured `workspace_scoped` governed tag:
 
-Only the administrator changes the accelerator. BU groups read the guarded published tables. Temporary test identities prove that the same guard works for a real group member.
+- a configured BU group sees its assigned workspace rows;
+- a principal in no configured BU group sees zero rows; and
+- a trusted principal is exempt and sees the unfiltered table, subject to normal grants.
 
-| Role | What it does |
+This also restricts pre-existing readers of a tagged system table unless they are configured or trusted. Review that impact before applying.
+
+## Terms
+
+| Term | Meaning |
 |---|---|
-| **Metastore administrator** | Plans, reviews and applies the published catalog, policies and grants. |
-| **BU account group** | Reads named published tables; Unity Catalog hides rows outside its assigned workspace IDs. |
-| **Representative service principal** | Temporarily joins one BU account group so `verify` can test that group's real access path through the SQL Statement Execution API. |
+| **Consumer group** | Databricks account group receiving direct system-table access |
+| **Workspace assignment** | Workspace IDs that the group manages |
+| **Governed tag** | Controlled table/column label used to select the ABAC policy |
+| **ABAC policy** | Catalog-scoped Unity Catalog policy that attaches the row filter |
+| **Governance schema** | Tenant-owned control-plane schema containing the UDF and deployment state only |
+| **Representative service principal** | Test identity placed in one consumer group; it authenticates as itself and does not impersonate a user |
 
-A service principal does **not** impersonate or assume the identity of a human user. It authenticates as itself. Its account-group membership makes it a representative for testing that group's access.
+## How every system table is handled
 
-## What happens to every system table?
+Every discovered table receives one explicit mode:
 
-Every discovered system table receives one explicit handling mode:
+1. **Workspace-scoped** — has a `workspace_id STRING` column; tagged and protected by the row filter.
+2. **Account-shared** — has no `workspace_id` column and is explicitly approved, with a written rationale, for all configured consumer groups. The approval also applies automatically to consumer groups added in future configurations, so treat it as a durable global-sharing decision.
+3. **Admin-only** — cannot be safely split by workspace and is not granted to consumers.
+4. **Unavailable** — source metadata cannot be inspected safely, so no grant or tag is added.
 
-1. **Workspace-scoped** — published with a mandatory workspace row filter.
-2. **Account-shared** — published without workspace filtering only after an explicit configuration override and written rationale. A table with any discovered `workspace_id` column can never use this mode.
-3. **Admin-only** — discovered and reported, but not published to BUs.
-4. **Unavailable** — reported but not published because its columns could not be safely inspected.
+A table with any discovered `workspace_id` column can never be marked account-shared. Nothing is silently shared.
 
-Nothing is silently omitted or silently shared.
+## What apply changes
 
-## What the accelerator creates
+The accelerator:
 
-In the target metastore it creates:
+1. creates the tenant-owned governance catalog and schema;
+2. creates `managed_grants` and `deployment_state` control tables;
+3. acquires a renewable deployment lease before any grant, tag, UDF, or policy mutation;
+4. revokes only `SELECT` grants recorded in its previous manifest;
+5. creates or validates the governed tags;
+6. creates the group-aware, fail-closed SQL UDF;
+7. creates the ABAC row-filter policy on `CATALOG system` before any policy-selecting tag is assigned;
+8. for each workspace-scoped source, tags `workspace_id` first and then tags the table, avoiding a tagged-but-unfiltered interval;
+9. proves that policy is effective on every workspace-scoped table;
+10. records the pending configuration digest, then records all desired direct grants as `PENDING`;
+11. grants `USE CATALOG`, required `USE SCHEMA`, and object-level `SELECT` to consumer groups;
+12. marks the manifest rows `ACTIVE`;
+13. records the successful configuration digest and clears the pending digest; and
+14. releases its lease. A process that dies stops renewing, allowing bounded stale-lease recovery after 30 minutes.
 
-1. one dedicated catalog and schema for published system-table data;
-2. two account-level governed tags;
-3. one SQL row-filter function generated from the configured group-to-workspace assignments;
-4. one materialized view for each workspace-scoped or explicitly account-shared source;
-5. governed tags on the published tables and each scoped `workspace_id` column;
-6. one ABAC row-filter policy over the published schema; and
-7. object-level grants on the named published tables.
+External grants not recorded in `managed_grants` are never revoked. If apply fails after writing `PENDING`, the next plan loads and revokes those tuples before retrying.
 
-Consumer groups receive `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the named published tables only. They do not receive schema-wide `SELECT`, access to materialization backing objects, or grants on the `system` catalog.
+The accelerator never automatically removes a direct governed tag. A stale `workspace_scoped` tag keeps the row filter and remains fail-closed. A stale `account_shared` tag has no row filter: managed `SELECT` grants are closed, but unrelated external grants must be audited before manual cleanup. The workspace-column tag is accepted only on a column named `workspace_id`.
 
-## Configuration
+## Configuration v2
 
-Start with [`examples/config.example.json`](examples/config.example.json), but store the real configuration outside this public repository.
-
-The important section is the group-to-workspace mapping:
+Start with [`examples/config.example.json`](examples/config.example.json), but keep real workspace IDs and principal names outside this public repository.
 
 ```json
 {
+  "version": 2,
+  "governance": {
+    "catalog": "system_tables_governance",
+    "schema": "abac"
+  },
+  "tags": {
+    "table_key": "system_table_scope",
+    "workspace_column_key": "workspace_scope_column"
+  },
   "consumer_groups": [
     {
       "name": "bu_alpha_system_table_readers",
       "workspace_ids": ["1111111111111111"]
-    },
-    {
-      "name": "bu_beta_system_table_readers",
-      "workspace_ids": [
-        "2222222222222222",
-        "3333333333333333"
-      ]
     }
   ],
-  "trusted_principals": [
-    "system_table_facade_admins",
-    "system_table_facade_pipeline"
-  ]
+  "trusted_principals": ["system_table_governance_admins"],
+  "overrides": []
 }
 ```
 
-Use canonical decimal workspace IDs, not workspace display names. Display names can be reused after a workspace is deleted or recreated.
+Use canonical decimal workspace IDs, not display names. Display names can be reused after deletion or recreation.
 
-- `consumer_groups` are the account groups receiving filtered access.
-- `trusted_principals` are narrowly scoped administrators or materialized-view run-as identities that need unfiltered access.
-- `overrides` are exceptional, reviewed decisions such as publishing a genuinely account-global reference table.
-
-The parser rejects unknown fields, duplicate JSON keys, unsafe identifiers, secret-shaped values, duplicate assignments within one group, overlap between consumer and trusted principals, and unsafe account-sharing overrides.
+Version 1 copied system data into materialized views and is deliberately rejected. See [v1 to v2 migration](docs/migration-v1-to-v2.md). Old copied objects are not dropped automatically.
 
 ## Operator workflow
 
@@ -153,18 +158,19 @@ Requirements:
 - Python 3.11+
 - Databricks CLI 0.292+
 - a serverless SQL warehouse
-- a Databricks profile for the administrator
-- the Unity Catalog and governed-tag privileges listed in [Prerequisites](#prerequisites)
+- an explicit administrator profile
+- privileges to create governed tags, tag system tables/columns, create the catalog policy, manage the governance schema, and grant system-table access
+- production **account groups**, not workspace-local groups
 
 ```bash
 uv sync --frozen
 . .venv/bin/activate
 ```
 
-### 2. Generate a read-only plan
+### 2. Plan — read only
 
 ```bash
-export DATABRICKS_WAREHOUSE_ID='<warehouse-id-kept-outside-git>'
+export DATABRICKS_WAREHOUSE_ID='<kept-outside-git>'
 
 abac-system-tables plan \
   --config /secure/path/config.json \
@@ -172,20 +178,11 @@ abac-system-tables plan \
   --output /secure/path/plan.json
 ```
 
-`plan` discovers system tables and the current published-catalog state. It does not change Unity Catalog.
+The redacted plan shows each table's mode, prior managed-grant count, stale protected tags, ordered operation kinds, and hashed targets. It does not print principal names, workspace IDs, SQL text, or tenant-specific grant targets.
 
-The public-safe plan output is intentionally redacted. It shows:
+`planDigest` binds the configuration, discovered tables, persisted deployment state, prior managed grants, current managed tags, and exact generated SQL.
 
-- every source table and its handling mode;
-- aggregate existing-object and direct-privilege counts;
-- operation kinds in execution order; and
-- hashed target references.
-
-It does **not** expose SQL statements, principal names or grant targets. The summary is enough to detect unexpected scope and account-sharing decisions, but it is not a complete production privilege review. Inspect tenant-specific grant and target details through your organization's protected change-management process.
-
-The output contains a `planDigest`. It binds the exact configuration, discovered sources, current objects and privileges, and generated SQL operations—even though those sensitive details are not printed in the public-safe summary.
-
-### 3. Apply exactly that reviewed plan
+### 3. Apply the reviewed plan
 
 ```bash
 abac-system-tables apply \
@@ -195,13 +192,13 @@ abac-system-tables apply \
   --output /secure/path/apply-evidence.json
 ```
 
-Apply re-runs discovery. If the sources, configuration or current privileges changed after planning, the digest no longer matches and apply stops.
+Apply re-runs discovery. Any drift changes the digest and blocks mutation. Prior accelerator-managed `SELECT` grants are revoked before policy/tag changes and restored only after all policy gates pass, so plan a temporary interruption for managed readers.
 
-For safety, every apply temporarily removes non-trusted access—including already-correct consumer grants—while materialized views, tags and policies are replaced. Consumer grants are restored only after every workspace-scoped table reports the expected effective ABAC policy. Plan a read interruption for each apply. A failed apply leaves consumers denied rather than reopening unverified access.
+`deployment_state` fixes the state version, tag keys, catalog policy scope, and policy name. Changing those immutable identifiers requires an explicit migration; apply blocks rather than losing track of prior grants. A pre-existing `workspace_scope` policy without compatible deployment state is treated as foreign and is never silently replaced. Other catalog row-filter policies are counted in the plan, and any policy that also resolves on a managed table causes the effective-policy gate to stop before grants.
 
-### 4. Verify with representative service principals
+### 4. Verify as representative service principals
 
-Create one temporary service principal for each BU test case, add it to exactly that BU's account group, and authenticate as the SP through a short-lived profile.
+Each profile must authenticate as the SP itself. The SP must belong to exactly the consumer group named by its scenario and must not be trusted.
 
 ```bash
 abac-system-tables verify \
@@ -211,48 +208,32 @@ abac-system-tables verify \
   --output /secure/path/verify-evidence.json
 ```
 
-A scenario can require:
+Verification accepts only direct `system.<schema>.<table>` relations:
 
-- `scoped` — at least one permitted workspace is visible and zero null, unassigned or cross-BU rows are visible;
-- `shared` — an approved account-shared table is readable; or
-- `denied` — access fails with an authorization error, not merely a timeout or missing object.
+- `scoped` requires non-empty permitted scope and zero null, unassigned, or cross-BU rows;
+- `shared` must be readable; and
+- `denied` must fail with an authorization-specific error, not a timeout or missing object.
 
-Verification first confirms that `current_user()` and `session_user()` match the expected SP, that the SP belongs to the intended consumer group, and that it is not a trusted exemption.
+Verification also proves the authenticated SP identity, intended consumer-group membership, absence from trusted exemptions, and the resulting row scope. In the authorised sandbox, all three representative SPs returned `is_account_group_member('account users') = true`; the direct catalog policy governed them and each direct system-table check returned one permitted workspace with zero cross-workspace violations.
 
-See [`examples/verify.example.json`](examples/verify.example.json) and [short-lived service-principal testing](docs/obo-testing.md).
+See [`examples/verify.example.json`](examples/verify.example.json) and [service-principal testing](docs/obo-testing.md).
 
-## Prerequisites
+## Safety boundaries
 
-The deployer needs enough privilege to:
+- Tags are applied to original system tables only after classification.
+- The row-filter UDF returns false for null, unknown, and unmapped workspace IDs.
+- Policy scope is fixed to `CATALOG system` and applies to account users except explicit trusted principals.
+- Consumer access is direct object-level `SELECT`; admin-only and unavailable tables receive no managed grant.
+- Only grants recorded in the manifest are revoked; unrelated external grants are untouched.
+- Stale direct tags are not automatically removed; workspace-scoped tags remain filtered, while account-shared tags require external-grant audit.
+- Partial or paginated verification evidence is rejected.
+- Normal output contains no credentials, tenant IDs, rows, principal names, or raw statement IDs.
 
-- read enabled system tables;
-- create and manage the dedicated catalog and schema;
-- create governed tags and assign them;
-- create materialized views and SQL functions;
-- create ABAC policies; and
-- manage grants on the published hierarchy.
-
-Production consumers must be Databricks **account groups** assigned to the relevant workspace. Do not use workspace-local groups for the policy configuration.
-
-The published schema must be dedicated to this accelerator. Unexpected user-created tables block planning rather than being deleted.
-
-## Safety properties
-
-- Unknown, null and unmapped workspace IDs are denied.
-- A source with a `workspace_id` column cannot be marked account-shared.
-- Consumers never receive direct grants from this project on `system`.
-- Consumers receive object-level `SELECT`, not schema-wide `SELECT`.
-- Existing direct non-trusted catalog, schema and table privileges are revoked before replacement.
-- Stale accelerator-managed materialized views are retired.
-- Existing governed tags are reused only when their allowed values match exactly.
-- Result rows, credentials and tenant identifiers are not written to normal plan/apply evidence.
-- Partial or paginated verification evidence is rejected rather than treated as complete.
-
-See [`SECURITY.md`](SECURITY.md) for the threat model and [`docs/operations.md`](docs/operations.md) for rollout and rollback guidance.
+See [`SECURITY.md`](SECURITY.md) and [`docs/operations.md`](docs/operations.md).
 
 ## Databricks bundle
 
-[`databricks.yml`](databricks.yml) packages the Python wheel and contains no live profile, host or tenant ID.
+[`databricks.yml`](databricks.yml) packages the wheel and contains generic governance variables only.
 
 ```bash
 databricks bundle validate --strict \
@@ -260,31 +241,23 @@ databricks bundle validate --strict \
   --profile '<administrator-profile>'
 ```
 
-Bundle validation checks packaging only. It does not deploy governance. The explicit `apply --confirm <planDigest>` command is the mutation boundary.
+Bundle validation does not deploy governance. `apply --confirm <planDigest>` is the mutation boundary.
 
 ## Public-repository safety
 
-Never commit:
-
-- Databricks profiles or workspace URLs;
-- workspace, account, metastore, warehouse or principal IDs;
-- OAuth secrets, PATs or private keys;
-- production group-to-workspace configuration;
-- raw query output; or
-- connected plan/apply evidence.
-
-Keep environment-specific desired state and evidence in a protected deployment repository or secret-backed pipeline.
+Never commit profiles, workspace URLs, tenant IDs, tokens, client secrets, private keys, production configuration, raw query output, or connected evidence.
 
 ## Limitations
 
-- Materialized data is not real time. Refresh latency follows the configured schedule.
-- Materialized views consume storage and refresh compute.
-- Compatibility and refresh cost can vary by system table and cloud or region.
-- Direct grants or broad roles on the original `system` catalog are outside this accelerator. Production verification must prove that consumers cannot bypass the published catalog.
+- Direct tagging and catalog ABAC require supported Databricks capabilities and sufficient administrator privileges.
+- Existing readers of a newly tagged workspace-scoped table are default-denied unless configured or trusted.
+- Navigation grants may remain after a group is retired; exact object-level `SELECT` is the managed security boundary.
+- The accelerator does not remove unrelated external grants.
 - Governed-tag propagation can take several minutes.
-- Every apply intentionally interrupts BU reads until all policy gates pass.
-- Catalog/schema/table ownership and non-table objects such as functions or volumes remain operational governance responsibilities.
-- A source whose metadata cannot be safely inspected remains unavailable rather than being guessed.
+- Apply is serialized with a renewable governance-state lease. A process that dies can be recovered after the 30-minute stale timeout; operators should not run a single blocking SQL operation longer than that timeout.
+- The governance schema and its state tables are a privileged security boundary. Only the deployment identity and trusted governance administrators may write them; manifest rows are validated against phase digests and tagged discovered targets before any revoke is generated.
+- Stale governed tags require a separately reviewed manual cleanup.
+- Old v1 copied catalogs and materialized views require separate, explicitly approved cleanup.
 
 ## Development
 
@@ -293,4 +266,4 @@ PYTHONPATH=src uv run --no-sync make check
 git diff --check
 ```
 
-The checks include formatting, lint, strict typing, 64 unit tests, coverage, package build, example parsing and secret scanning.
+Checks include formatting, lint, strict typing, tests with coverage, package build, example parsing, and secret scanning.

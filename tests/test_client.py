@@ -93,6 +93,7 @@ def test_sdk_client_fails_for_terminal_error() -> None:
     with pytest.raises(StatementError, match="FAILED") as captured:
         client.execute("SELECT")
     assert captured.value.state == "FAILED"
+    assert "platform detail" not in str(captured.value)
 
     api = FakeExecutionApi([response("FAILED", error_code="PERMISSION_DENIED", sql_state="42501")])
     client = DatabricksSqlClient("p", "w", workspace_client=FakeWorkspace(api))

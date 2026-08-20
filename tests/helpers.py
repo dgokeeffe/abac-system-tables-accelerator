@@ -9,12 +9,8 @@ from abac_system_tables.client import StatementResult
 
 def valid_config_data() -> dict[str, Any]:
     return {
-        "version": 1,
-        "facade": {
-            "catalog": "facade_catalog",
-            "schema": "published",
-            "refresh_every_hours": 24,
-        },
+        "version": 2,
+        "governance": {"catalog": "governance_catalog", "schema": "system_tables_abac"},
         "tags": {
             "table_key": "system_table_scope",
             "workspace_column_key": "workspace_scope_column",
@@ -23,7 +19,7 @@ def valid_config_data() -> dict[str, Any]:
             {"name": "bu_alpha", "workspace_ids": ["111", "222"]},
             {"name": "bu_beta", "workspace_ids": ["333"]},
         ],
-        "trusted_principals": ["facade_admins", "facade_pipeline"],
+        "trusted_principals": ["governance_admins", "governance_pipeline"],
         "overrides": [],
     }
 
